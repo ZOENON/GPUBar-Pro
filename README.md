@@ -46,7 +46,7 @@
 1. **下载文件**
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/GPUBar-Pro.git
+git clone https://github.com/ZOENON/GPUBar-Pro.git
 cd GPUBar-Pro
 ```
 
@@ -224,6 +224,7 @@ Host gpu-server2
 ```
 
 > 💡 **关键点**：`ProxyCommand ~/.ssh/proxy.sh %h %p` 会自动检测 VPN 状态：
+>
 > - VPN 运行时 → 走 SOCKS5 代理
 > - VPN 未运行 → 直连（适用于校内网络）
 
@@ -267,16 +268,17 @@ ssh-copy-id gpu-server2
 └─────────────────────────────────────────────────────────┘
 ```
 
-| 场景 | 操作 |
-|------|------|
-| 校内 | 直接打开 Cursor，连接服务器 |
+| 场景 | 操作                                          |
+| ---- | --------------------------------------------- |
+| 校内 | 直接打开 Cursor，连接服务器                   |
 | 校外 | 先从菜单栏启动 VPN，等连接成功后再打开 Cursor |
 
 ### 常见问题
 
 **Q: Cursor 连接时卡住？**
 
-A: 
+A:
+
 1. 确认 VPN 已连接（菜单栏显示 🟢）
 2. 终端测试：`ssh gpu-server1` 是否正常
 3. 查看日志：`~/.cursor-server/` 或 `~/.vscode-server/`
