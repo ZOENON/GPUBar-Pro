@@ -15,7 +15,7 @@ CONTAINER_NAME="easyconnect"
 VPN_SCRIPT="$HOME/Documents/SwiftBar/vpn_control.sh"
 # ============================================================
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR"
+SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=3 -o BatchMode=yes -o LogLevel=ERROR"
 
 # 检测 VPN 是否运行
 VPN_RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$" && echo "true" || echo "false")
@@ -32,6 +32,64 @@ else
   NETWORK_STATUS="📡 直连模式"
 fi
 
+# 创建临时目录存放并行结果
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
+
+# ========== 并行查询所有服务器 ==========
+for i in "${!SERVERS[@]}"; do
+  server="${SERVERS[$i]}"
+  (
+    IFS='|' read -r alias user host port <<< "$server"
+    
+    # 构建 SSH 命令
+    if [ "$USE_PROXY" = true ]; then
+      SSH_CMD="/usr/bin/ssh $SSH_OPTS -o ProxyCommand='nc -x $SOCKS_PROXY %h %p' -p $port ${user}@${host}"
+    else
+      SSH_CMD="/usr/bin/ssh $SSH_OPTS -p $port ${user}@${host}"
+    fi
+    
+    # 获取 GPU 数据
+    RAW_DATA=$(eval $SSH_CMD "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.free,memory.total --format=csv,noheader,nounits" 2>/dev/null | grep -v "^Warning\|^Error\|^\[Warning")
+    
+    if [ -z "$RAW_DATA" ]; then
+      echo "$alias | color=red" > "$TEMP_DIR/$i.out"
+      echo "--⚠️ 连接失败 | color=gray" >> "$TEMP_DIR/$i.out"
+      echo "STATS:0:0" >> "$TEMP_DIR/$i.out"
+    else
+      # 解析 GPU 数据
+      echo "$RAW_DATA" | awk -F', ' -v alias="$alias" -v user="$user" -v host="$host" -v port="$port" '
+      BEGIN { free_count = 0; gpu_count = 0; menu = "" }
+      {
+        idx=$1; name=$2; util=$3; mem_free=$4; mem_total=$5
+        gpu_count++
+        
+        gsub(/NVIDIA /, "", name)
+        gsub(/GeForce /, "", name)
+        split(name, a, "-"); if(length(a[1])>0) name=a[1]
+        
+        if (util < 5 && mem_free > 4000) {
+          icon = "🟢"; free_count++; color = ""
+        } else {
+          icon = "🔴"; color = " | color=#FF453A"
+        }
+        
+        menu = menu sprintf("--%s [%s] %s: %dMB/%dMB (%d%%) | font=Menlo size=11 refresh=true%s\n", icon, idx, name, mem_free, mem_total, util, color)
+      }
+      END {
+        title_color = (free_count == 0) ? " | color=#FF453A" : " | color=#30D158"
+        printf "%s (%d/%d)%s\n%s", alias, free_count, gpu_count, title_color, menu
+        printf "--🔗 SSH | shell=ssh param1=%s@%s param2=-p param3=%s terminal=true\n", user, host, port
+        printf "STATS:%d:%d\n", free_count, gpu_count
+      }' > "$TEMP_DIR/$i.out"
+    fi
+  ) &
+done
+
+# 等待所有后台任务完成
+wait
+
+# ========== 收集并行结果 ==========
 total_free=0
 total_gpus=0
 all_output=""
@@ -40,60 +98,20 @@ all_output=""
 all_output+="$NETWORK_STATUS\n"
 all_output+="---\n"
 
-for server in "${SERVERS[@]}"; do
-  IFS='|' read -r alias user host port <<< "$server"
-  
-  # 构建 SSH 命令
-  if [ "$USE_PROXY" = true ]; then
-    SSH_CMD="/usr/bin/ssh $SSH_OPTS -o ProxyCommand='nc -x $SOCKS_PROXY %h %p' -p $port ${user}@${host}"
-  else
-    SSH_CMD="/usr/bin/ssh $SSH_OPTS -p $port ${user}@${host}"
-  fi
-  
-  # 获取 GPU 数据
-  RAW_DATA=$(eval $SSH_CMD "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.free,memory.total --format=csv,noheader,nounits" 2>/dev/null | grep -v "^Warning\|^Error\|^\[Warning")
-  
-  if [ -z "$RAW_DATA" ]; then
-    all_output+="$alias | color=red\n"
-    all_output+="--⚠️ 连接失败 | color=gray\n"
-    continue
-  fi
-  
-  # 解析 GPU 数据
-  server_output=$(echo "$RAW_DATA" | awk -F', ' -v alias="$alias" -v user="$user" -v host="$host" -v port="$port" '
-  BEGIN { free_count = 0; gpu_count = 0; menu = "" }
-  {
-    idx=$1; name=$2; util=$3; mem_free=$4; mem_total=$5
-    gpu_count++
+for i in "${!SERVERS[@]}"; do
+  if [ -f "$TEMP_DIR/$i.out" ]; then
+    server_output=$(cat "$TEMP_DIR/$i.out")
     
-    gsub(/NVIDIA /, "", name)
-    gsub(/GeForce /, "", name)
-    split(name, a, "-"); if(length(a[1])>0) name=a[1]
+    # 统计
+    stats=$(echo "$server_output" | grep "^STATS:")
+    if [ -n "$stats" ]; then
+      total_free=$((total_free + $(echo "$stats" | cut -d: -f2)))
+      total_gpus=$((total_gpus + $(echo "$stats" | cut -d: -f3)))
+    fi
     
-    if (util < 5 && mem_free > 4000) {
-      icon = "🟢"; free_count++; color = ""
-    } else {
-      icon = "🔴"; color = " | color=#FF453A"
-    }
-    
-    menu = menu sprintf("--%s [%s] %s: %dMB/%dMB (%d%%) | font=Menlo size=11 refresh=true%s\n", icon, idx, name, mem_free, mem_total, util, color)
-  }
-  END {
-    title_color = (free_count == 0) ? " | color=#FF453A" : " | color=#30D158"
-    printf "%s (%d/%d)%s\n%s", alias, free_count, gpu_count, title_color, menu
-    printf "--🔗 SSH | shell=ssh param1=%s@%s param2=-p param3=%s terminal=true\n", user, host, port
-    printf "STATS:%d:%d\n", free_count, gpu_count
-  }')
-  
-  # 统计
-  stats=$(echo "$server_output" | grep "^STATS:")
-  if [ -n "$stats" ]; then
-    total_free=$((total_free + $(echo "$stats" | cut -d: -f2)))
-    total_gpus=$((total_gpus + $(echo "$stats" | cut -d: -f3)))
+    all_output+=$(echo "$server_output" | grep -v "^STATS:")
+    all_output+="\n"
   fi
-  
-  all_output+=$(echo "$server_output" | grep -v "^STATS:")
-  all_output+="\n"
 done
 
 # === 顶部状态栏 ===
